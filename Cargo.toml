@@ -1,0 +1,64 @@
+[package]
+name = "black-pill-http"
+version = "0.1.0"
+authors = ["Adrian Parvin D. Ouano <me@adrianpar.vin>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[patch.crates-io]
+usb-device = { git = "https://github.com/Sawchord/usb-device", rev = "136b00ea3228ec8b8045698688ac7a52bcc3471d" }
+
+[dependencies]
+embedded-hal = "0.2"
+nb = "1"
+cortex-m = "0.7"
+cortex-m-rt = "0.6"
+cortex-m-rtic = { git = "https://github.com/rtic-rs/cortex-m-rtic", rev = "9bea30b5a8466f1ecef8a72eccb994be8cba22a8" }
+rtic-monotonic = "0.1.0-alpha.1"
+dwt-systick-monotonic = "0.1.0-alpha.2"
+# Panic behaviour, see https://crates.io/keywords/panic-impl for alternatives
+panic-halt = "0.2"
+heapless = "0.7.1"
+usb-device = { git = "https://github.com/Sawchord/usb-device", rev = "136b00ea3228ec8b8045698688ac7a52bcc3471d" }
+usbd-serial = "0.1.1"
+defmt = "0.2.0"
+defmt-rtt = "0.2.0"
+rtcc = "0.2"
+core_io = "0.1.20210325"
+
+[dependencies.managed]
+version = "0.7.2"
+default-features = false
+
+[dependencies.smoltcp]
+git = "https://github.com/smoltcp-rs/smoltcp"
+rev = "027f255f904b9b7c4226cfd8b2d31f272ffa5105"
+default-features = false
+features = ["proto-ipv4", "medium-ethernet", "socket-tcp"]
+
+[dependencies.stm32f4xx-hal]
+version = "0.9"
+features = ["rt", "stm32f401", "usb_fs"] # replace the model of your microcontroller here
+
+[dependencies.httparse]
+version = "1.4.1"
+default-features = false
+
+# Set the default for dependencies.
+[profile.dev.package."*"]
+opt-level = 'z'
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[features]
+defmt-default = []
+defmt-trace = []
+defmt-debug = []
+defmt-info = []
+defmt-warn = []
+defmt-error = []
+
+default = ["defmt-default", "smoltcp/defmt-trace"]
