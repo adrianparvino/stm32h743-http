@@ -1,2 +1,2 @@
 #[derive(Debug)]
-enum Method { Get, Post, Options, Unknown }
+pub enum Method { Get, Post, Options, Unknown }

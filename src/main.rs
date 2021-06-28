@@ -1,7 +1,7 @@
-#![feature(maybe_uninit_ref)]
 // #![deny(unsafe_code)]
 #![deny(warnings)]
 #![allow(unused_imports)]
+#![allow(unused_must_use)]
 #![allow(dead_code)]
 #![no_std]
 #![no_main]
@@ -12,43 +12,70 @@ mod cdc_ecm;
 mod veth;
 mod response_builder;
 mod request;
+mod http_server;
 
 extern crate managed;
 
 use defmt_rtt as _;
 use panic_halt as _;
 
-#[app(device = stm32f4xx_hal::stm32, peripherals = true, dispatchers = [USART1])]
+#[app(device = stm32f4xx_hal::stm32, peripherals = true, dispatchers = [USART1, USART2])]
 mod app {
     use rtic::Monotonic;
+    use rtic::time::duration::Seconds;
     use rtic::time::duration::Milliseconds;
+    use rtic::time::duration::Microseconds;
     use stm32f4xx_hal::{
         gpio::{gpioa::PA0, gpioc::PC13, Input, Output, PullUp, PushPull},
         otg_fs::{UsbBus, USB, UsbBusType},
         prelude::*,
-        rtc::Rtc,
     };
 
     use usb_device::prelude::*;
     use usb_device::class_prelude::UsbBusAllocator;
 
+    use smoltcp::time::Duration;
     use smoltcp::iface::{Neighbor, NeighborCache, InterfaceBuilder, Interface as EthernetInterface};
-    use smoltcp::wire::{IpCidr, IpAddress, EthernetAddress};
-    use smoltcp::socket::{SocketHandle, TcpState, TcpSocket, TcpSocketBuffer, SocketSet, SocketSetItem};
+    use smoltcp::wire::{
+        IpCidr,
+        IpAddress,
+        Ipv6Repr,
+        EthernetAddress,
+        IpVersion,
+        IpProtocol::*,
+        Icmpv6Repr::Ndisc,
+        NdiscRouterFlags,
+        NdiscPrefixInformation,
+        NdiscPrefixInfoFlags,
+        NdiscRepr::*
+    };
+    use smoltcp::socket::{
+        SocketHandle,
+        SocketSet,
+        SocketSetItem,
+        TcpSocket, TcpSocketBuffer,
+        UdpSocket, UdpSocketBuffer, UdpPacketMetadata,
+        RawSocket, RawSocketBuffer, RawPacketMetadata,
+    };
 
     use dwt_systick_monotonic::DwtSystick;
 
-    use rtcc::Rtcc;
+    use replace_with::replace_with_or_abort;
 
     use core::mem::MaybeUninit;
 
-    // use crate::hd44780_i2c::de;
     use crate::cdc_ecm::*;
     use crate::veth::*;
-    use crate::response_builder::*;
-    use crate::request::*;
+    use crate::http_server::{self, State as HttpState};
 
-    use core_io::Write;
+    use heapless::Vec;
+
+    #[derive(Debug)]
+    pub enum TcpContinuation {
+        Listen(&'static mut Vec<u8, 1024>),
+        Receive(&'static mut Vec<u8, 1024>),
+        Transmit(&'static mut Vec<u8, 1024>, &'static [u8]),
+    }
 
     #[resources]
     struct Resources {
@@ -56,46 +83,66 @@ mod app {
         iface: EthernetInterface<'static, Veth<'static, UsbBus<USB>>>,
         sockets: SocketSet<'static>,
         // rtc: Rtc,
-        tcp_handle: SocketHandle,
         button: PA0<Input<PullUp>>,
-        led: PC13<Output<PushPull>>
+        led: PC13<Output<PushPull>>,
+
+        #[lock_free]
+        http_servers: [http_server::State; 2]
     }
 
     #[monotonic(binds = SysTick, default = true)]
-    type MyMono = DwtSystick<84_000_000>; // 84 MHz
-
-    #[cfg(not(debug_assertions))]
-    const INDEX_HTML: &[u8] = include_bytes!("index.html");
-    #[cfg(not(debug_assertions))]
-    const APP_JS: &[u8] = include_bytes!("app.js.gz");
-    #[cfg(not(debug_assertions))]
-    const SITE_CSS: &[u8] = include_bytes!("site.css");
+    type MyMono = DwtSystick<108_000_000>; // 108 MHz
 
     #[init]
     fn init(mut ctx: init::Context) -> (init::LateResources, init::Monotonics) {
-        static mut EP_MEMORY: [u32; 2048] = [0; 2048];
-        static mut USB_BUS: MaybeUninit<UsbBusAllocator<UsbBusType>> = MaybeUninit::uninit();
-        static mut IP_ADDRS: MaybeUninit<[IpCidr; 1]> = MaybeUninit::uninit();
-        static mut NEIGHBOR_CACHE: [Option<(IpAddress, Neighbor)>; 8] = [None; 8];
-        static mut SOCKET_STORE: [Option<SocketSetItem<'static>>; 8] = [None, None, None, None, None, None, None, None];
-
         static mut ETH_RX_BUFFER: [u8; 1514] = [0u8; 1514];
         static mut ETH_TX_BUFFER: [u8; 1514] = [0u8; 1514];
 
-        static mut TCP_RX_BUFFER: [u8; 1024] = [0u8; 1024];
-        static mut TCP_TX_BUFFER: [u8; 1024] = [0u8; 1024];
+        static mut TCP_RX_BUFFER0: [u8; 128] = [0u8; 128];
+        static mut TCP_TX_BUFFER0: [u8; 1024] = [0u8; 1024];
+        static mut HTTP_STATE0: Vec<u8, 1024> = Vec::new();
+
+        static mut TCP_RX_BUFFER1: [u8; 128] = [0u8; 128];
+        static mut TCP_TX_BUFFER1: [u8; 1024] = [0u8; 1024];
+        static mut HTTP_STATE1: Vec<u8, 1024> = Vec::new();
+
+        static mut MDNS_RX_BUFFER: [u8; 512] = [0u8; 512];
+        static mut MDNS_TX_BUFFER: [u8; 512] = [0u8; 512];
+        static mut MDNS_RX_UDP_PACKET_METADATA: [UdpPacketMetadata; 4] = [UdpPacketMetadata::EMPTY; 4];
+        static mut MDNS_TX_UDP_PACKET_METADATA: [UdpPacketMetadata; 4] = [UdpPacketMetadata::EMPTY; 4];
+
+        static mut ICMP_RX_BUFFER: [u8; 512] = [0u8; 512];
+        static mut ICMP_TX_BUFFER: [u8; 512] = [0u8; 512];
+        static mut ICMP_RX_PACKET_METADATA: [RawPacketMetadata; 4] = [RawPacketMetadata::EMPTY; 4];
+        static mut ICMP_TX_PACKET_METADATA: [RawPacketMetadata; 4] = [RawPacketMetadata::EMPTY; 4];
+
+        static mut EP_MEMORY: [u32; 2048] = [0; 2048];
+        static mut USB_BUS: MaybeUninit<UsbBusAllocator<UsbBusType>> = MaybeUninit::uninit();
+        static mut IP_ADDRS: MaybeUninit<[IpCidr; 2]> = MaybeUninit::uninit();
+        static mut NEIGHBOR_CACHE: [Option<(IpAddress, Neighbor)>; 8] = [None; 8];
+        static mut SOCKET_STORE: [Option<SocketSetItem<'static>>; 8] = [None, None, None, None, None, None, None, None];
+
+        let ip_addrs: &'static mut [IpCidr] = unsafe {
+            IP_ADDRS.as_mut_ptr().write([
+                IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 0, 0xff, 0xfe00, 1), 64),
+                IpCidr::new(IpAddress::v6(0xfd00, 0, 0, 0, 0, 0, 0, 1), 64)
+            ]);
+            IP_ADDRS.assume_init_mut()
+        };
+
+        let neighbor_cache = NeighborCache::new(NEIGHBOR_CACHE as &'static mut [Option<(IpAddress, Neighbor)>] );
 
         let rcc = ctx.device.RCC.constrain();
-        let clocks = rcc.cfgr
-            .use_hse(25.mhz())
-            .sysclk(84.mhz())
-            .pclk1(24.mhz())
-            .require_pll48clk()
-            .freeze();
+        let clocks = unsafe {
+            rcc.cfgr
+                .use_hse(25.mhz())
+                .sysclk(108.mhz())
+                .pclk1(24.mhz())
+                .require_pll48clk()
+                .freeze_unchecked()
+        };
 
-        // let rtc = Rtc::new(ctx.device.RTC, 0, 0, false, &mut ctx.device.PWR);
-
-        let dwt_systick = MyMono::new(&mut ctx.core.DCB, ctx.core.DWT, ctx.core.SYST, 84_000_000);
+        let dwt_systick = MyMono::new(&mut ctx.core.DCB, ctx.core.DWT, ctx.core.SYST, 108_000_000);
 
         let gpioa = ctx.device.GPIOA.split();
         let button = gpioa.pa0.into_pull_up_input();
@@ -127,13 +174,6 @@ mod app {
 
         let veth = ecm.jack_in();
 
-        let ip_addrs: &'static mut [IpCidr] = unsafe {
-            IP_ADDRS.as_mut_ptr().write([IpCidr::new(IpAddress::v4(169, 254, 12, 34), 7)]);
-            IP_ADDRS.assume_init_mut()
-        };
-
-        let neighbor_cache = NeighborCache::new(NEIGHBOR_CACHE as &'static mut [Option<(IpAddress, Neighbor)>] );
-
         let iface = InterfaceBuilder::new(veth)
             .ethernet_addr(EthernetAddress::from_bytes(&[2,0,0,0,0,1]))
             .neighbor_cache(neighbor_cache)
@@ -142,22 +182,39 @@ mod app {
 
         let mut sockets = SocketSet::new(SOCKET_STORE as &'static mut [Option<SocketSetItem<'static>>]);
 
-        let tcp_rx_buffer = TcpSocketBuffer::new(TCP_RX_BUFFER as &'static mut [u8]);
-        let tcp_tx_buffer = TcpSocketBuffer::new(TCP_TX_BUFFER as &'static mut [u8]);
-        let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
+        let tcp_rx_buffer0 = TcpSocketBuffer::new(TCP_RX_BUFFER0 as &'static mut [u8]);
+        let tcp_tx_buffer0 = TcpSocketBuffer::new(TCP_TX_BUFFER0 as &'static mut [u8]);
+        let tcp_socket0 = TcpSocket::new(tcp_rx_buffer0, tcp_tx_buffer0);
+        let tcp_handle0 = sockets.add(tcp_socket0);
+        let http_server0 = HttpState::new(tcp_handle0, HTTP_STATE0);
 
-        let tcp_handle = sockets.add(tcp_socket);
+        let tcp_rx_buffer1 = TcpSocketBuffer::new(TCP_RX_BUFFER1 as &'static mut [u8]);
+        let tcp_tx_buffer1 = TcpSocketBuffer::new(TCP_TX_BUFFER1 as &'static mut [u8]);
+        let tcp_socket1 = TcpSocket::new(tcp_rx_buffer1, tcp_tx_buffer1);
+        let tcp_handle1 = sockets.add(tcp_socket1);
+        let http_server1 = HttpState::new(tcp_handle1, HTTP_STATE1);
 
-        sockets.get::<TcpSocket>(tcp_handle).listen((IpAddress::v4(169, 254, 12, 34), 8080)).unwrap();
+        let mdns_rx_buffer = UdpSocketBuffer::new(MDNS_RX_UDP_PACKET_METADATA as &'static mut [UdpPacketMetadata], MDNS_RX_BUFFER as &'static mut [u8]);
+        let mdns_tx_buffer = UdpSocketBuffer::new(MDNS_TX_UDP_PACKET_METADATA as &'static mut [UdpPacketMetadata], MDNS_TX_BUFFER as &'static mut [u8]);
+        let mdns_socket = UdpSocket::new(mdns_rx_buffer, mdns_tx_buffer);
+        let mdns_handle = sockets.add(mdns_socket);
+        sockets.get::<UdpSocket>(mdns_handle).bind(5353).unwrap();
 
-        handle_ethernet::spawn_after(Milliseconds(1u32)).unwrap();
+        let icmp_rx_buffer = RawSocketBuffer::new(ICMP_RX_PACKET_METADATA as &'static mut [RawPacketMetadata], ICMP_RX_BUFFER as &'static mut [u8]);
+        let icmp_tx_buffer = RawSocketBuffer::new(ICMP_TX_PACKET_METADATA as &'static mut [RawPacketMetadata], ICMP_TX_BUFFER as &'static mut [u8]);
+        let icmp_socket = RawSocket::new(IpVersion::Ipv6, Icmpv6, icmp_rx_buffer, icmp_tx_buffer);
+        let icmp_handle = sockets.add(icmp_socket);
+
+        raw_recv::spawn_after(Milliseconds(4500u32), icmp_handle).unwrap();
+        mdns_recv::spawn_after(Seconds(5u32), mdns_handle).unwrap();
+        usb_poll::spawn().unwrap();
 
         (init::LateResources {
             usb_dev,
             iface,
             sockets,
-            tcp_handle,
             button,
+            http_servers: [http_server0, http_server1],
             // rtc,
             led
         }, init::Monotonics(dwt_systick))
@@ -176,205 +233,114 @@ mod app {
         });
     }
 
-    #[task(resources = [sockets, tcp_handle, led])]
-    fn handle_ethernet(ctx: handle_ethernet::Context) {
-        static mut RESPONSE: Option<&'static [u8]> = None;
-        let handle_ethernet::Resources {mut sockets, mut tcp_handle, mut led} = ctx.resources;
+    #[task(priority = 2, resources = [sockets])]
+    fn mdns_recv(ctx: mdns_recv::Context, mdns_handle: SocketHandle) {
+        let mdns_recv::Resources {mut sockets} = ctx.resources;
 
-        (&mut tcp_handle, &mut sockets).lock(|tcp_handle, sockets| {
-            let mut socket = sockets.get::<TcpSocket>(*tcp_handle);
+        sockets.lock(|sockets| {
+            let mut socket = sockets.get::<UdpSocket>(mdns_handle);
 
-            match socket.state() {
-                TcpState::Closed => {
-                    let _ = socket.listen((IpAddress::v4(169, 254, 12, 34), 8080));
-                    return;
-                }
+            let reply = [
+                0x00, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+                4, 116, 101, 115, 116, 5, 108, 111, 99, 97, 108, 0,
+                0x00, 28, 0x80, 0x01, 0x00, 0x00, 0x00, 0xff, 0x00, 0x10,
+                0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+            ];
 
-                TcpState::CloseWait => {
-                    socket.close();
-                    return;
-                }
-
-                TcpState::Established => {
-                    let mut buffer = [0u8; 512];
-
-
-                    match RESPONSE {
-                        None => {
-                            let result = socket.recv(|data| {
-                                let mut headers = [httparse::EMPTY_HEADER; 16];
-                                let mut req = httparse::Request::new(&mut headers);
-
-                                match req.parse(data) {
-                                    Ok(httparse::Status::Complete(x)) => {
-                                        let ref request_path = req.path.unwrap();
-                                        let method = match req.method.unwrap() {
-                                            "GET" => Method::Get,
-                                            "POST" => Method::Post,
-                                            "OPTIONS" => Method::Options,
-                                            _ => Method::Unknown
-                                        };
-                                        let path_length = request_path.len();
-                                        let content_length = headers.iter().find_map(|&httparse::Header {name, value}| {
-                                            if name.chars().zip("content-length".chars()).all(|(x, y)| x.to_ascii_lowercase() == y) {
-                                                core::str::from_utf8(value)
-                                                    .ok()
-                                                    .and_then(|x| str::parse::<usize>(x).ok())
-                                            } else {
-                                                None
-                                            }
-                                        }).unwrap_or(0);
-
-                                        write!(&mut buffer[..path_length], "{}", request_path).unwrap();
-                                        (&mut buffer[path_length..]).write(&data[x..x + content_length]).unwrap();
-                                        (x + content_length,
-                                         Some((
-                                             method,
-                                             &buffer[..path_length],
-                                             &buffer[path_length..path_length + content_length]
-                                         )))
-                                    },
-                                    _ => {
-                                        (0, None)
-                                    }
-                                }
-                            }).unwrap();
-
-                            match result {
-                                #[cfg(not(debug_assertions))]
-                                Some((Method::Get, b"/", _)) => {
-                                    let response = INDEX_HTML;
-                                    socket.send(|buf| {
-                                        let response = ResponseBuilder::new(buf)
-                                            .status(200)
-                                            .access_control_allow_headers("content-type")
-                                            .content_length(response.len())
-                                            .access_control_allow_origin("*")
-                                            .finalize();
-                                        (response.len(), ())
-                                    }).unwrap();
-
-                                    *RESPONSE = Some(response);
-                                },
-                                #[cfg(not(debug_assertions))]
-                                Some((Method::Get, b"/js/app.js", _)) => {
-                                    let response = APP_JS;
-                                    socket.send(|buf| {
-                                        let response = ResponseBuilder::new(buf)
-                                            .status(200)
-                                            .access_control_allow_headers("content-type")
-                                            .content_length(response.len())
-                                            .content_encoding("gzip")
-                                            .access_control_allow_origin("*")
-                                            .finalize();
-                                        (response.len(), ())
-                                    }).unwrap();
-
-                                    *RESPONSE = Some(response);
-                                },
-                                #[cfg(not(debug_assertions))]
-                                Some((Method::Get, b"/css/site.css", _)) => {
-                                    let response = SITE_CSS;
-                                    socket.send(|buf| {
-                                        let response = ResponseBuilder::new(buf)
-                                            .status(200)
-                                            .access_control_allow_headers("content-type")
-                                            .content_length(response.len())
-                                            .access_control_allow_origin("*")
-                                            .finalize();
-                                        (response.len(), ())
-                                    }).unwrap();
-
-                                    *RESPONSE = Some(response);
-                                },
-                                Some((Method::Get, b"/led", _)) => {
-                                    let response = if led.lock(|led| led.is_low().unwrap()) { &b"TRUE"[..] } else { &b"FALSE"[..] };
-
-                                    socket.send(|buf| {
-                                        let response = ResponseBuilder::new(buf)
-                                            .status(200)
-                                            .access_control_allow_origin("*")
-                                            .content_length(response.len())
-                                            .finalize();
-                                        (response.len(), ())
-                                    }).unwrap();
-
-                                    *RESPONSE = Some(response);
-                                },
-                                Some((Method::Post, b"/led", body)) => {
-                                    socket.send(|buf| {
-                                        let response = ResponseBuilder::new(buf)
-                                            .status(204)
-                                            .access_control_allow_origin("*")
-                                            .finalize();
-                                        (response.len(), ())
-                                    }).unwrap();
-
-                                    match body {
-                                        b"set=true" => set_led::spawn(true).unwrap(),
-                                        b"set=false" => set_led::spawn(false).unwrap(),
-                                        _ => {}
-                                    }
-                                },
-                                Some((Method::Options, _, _)) => {
-                                    socket.send(|buf| {
-                                        let response = ResponseBuilder::new(buf)
-                                            .status(204)
-                                            .access_control_allow_origin("*")
-                                            .access_control_allow_headers("content-type")
-                                            .finalize();
-                                        (response.len(), ())
-                                    }).unwrap();
-                                },
-                                Some((_, _, _)) => {
-                                    socket.send(|buf| {
-                                        let response = ResponseBuilder::new(buf)
-                                            .status(404)
-                                            .content_length(0)
-                                            .finalize();
-                                        (response.len(), ())
-                                    }).unwrap();
-                                },
-                                _ => {}
-                            }
-                        },
-
-                        Some(response) => {
-                            match socket.send_slice(response) {
-                                Ok(bytes_sent) => {
-                                    let new_response = &response[bytes_sent..];
-
-                                    if new_response.len() == 0 {
-                                        *RESPONSE = None;
-                                    } else {
-                                        *RESPONSE = Some(new_response);
-                                    }
-                                }
-                                _ => {}
-                            };
-                        }
-                    }
-                }
-                _ => {}
-            };
+            socket.send_slice(&reply, smoltcp::wire::IpEndpoint::new(IpAddress::v6(0xff02, 0, 0, 0, 0, 0, 0, 0xfb), 5353));
         });
 
-        handle_ethernet::spawn_after(Milliseconds(1u32)).unwrap();
+        mdns_recv::spawn_after(Seconds(1u32), mdns_handle).unwrap();
     }
 
-    #[idle(resources = [usb_dev, sockets, iface])]
-    fn idle(ctx: idle::Context) -> ! {
-        let idle::Resources {mut usb_dev, mut iface, mut sockets} = ctx.resources;
+    #[task(priority = 2, resources = [sockets])]
+    fn raw_recv(ctx: raw_recv::Context, raw_handle: SocketHandle) {
+        let raw_recv::Resources {mut sockets} = ctx.resources;
 
-        loop {
-            (&mut usb_dev, &mut iface, &mut sockets).lock(|usb_dev, iface, sockets| {
-                usb_dev.poll(&mut [iface.device_mut().inner()]);
+        sockets.lock(|sockets| {
+            let mut socket = sockets.get::<RawSocket>(raw_handle);
 
-                let instant = smoltcp::time::Instant::from_millis(
-                    monotonics::MyMono::now().duration_since_epoch().integer()/84_000
-                );
-                let _ = iface.poll(sockets, instant);
+            let advert = Ndisc(RouterAdvert {
+                hop_limit: 0,
+                flags: NdiscRouterFlags::empty(),
+                router_lifetime: Duration::from_secs(9000),
+                reachable_time: Duration::from_secs(0),
+                retrans_time: Duration::from_secs(0),
+                lladdr: Some(EthernetAddress::from_bytes(&[2,0,0,0,0,1])),
+                mtu: None,
+                prefix_info: Some(NdiscPrefixInformation {
+                    prefix_len: 64,
+                    flags: NdiscPrefixInfoFlags::ADDRCONF | NdiscPrefixInfoFlags::ON_LINK,
+                    valid_lifetime: Duration::from_secs(0xffffffff),
+                    preferred_lifetime: Duration::from_secs(0xffffffff),
+                    prefix: smoltcp::wire::Ipv6Address([0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+                })
             });
+
+            let ipv6_header = Ipv6Repr {
+                src_addr: smoltcp::wire::Ipv6Address([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xfe, 0, 0, 1]),
+                dst_addr: smoltcp::wire::Ipv6Address::LINK_LOCAL_ALL_NODES,
+                hop_limit: 255,
+                next_header: Icmpv6,
+                payload_len: advert.buffer_len()
+            };
+
+            if let Ok(buffer) = socket.send(ipv6_header.buffer_len() + advert.buffer_len()) {
+                let mut packet = smoltcp::wire::Ipv6Packet::new_unchecked(buffer);
+                ipv6_header.emit(&mut packet);
+                let mut packet = smoltcp::wire::Icmpv6Packet::new_unchecked(packet.payload_mut());
+                advert.emit(
+                    &IpAddress::from(ipv6_header.src_addr),
+                    &IpAddress::from(ipv6_header.dst_addr),
+                    &mut packet,
+                    &smoltcp::phy::ChecksumCapabilities::default()
+                );
+            }
+        });
+
+        raw_recv::spawn_after(Seconds(1u32), raw_handle).unwrap();
+    }
+
+    #[task(resources = [sockets, led, http_servers])]
+    fn http_step(ctx: http_step::Context) {
+        let http_step::Resources {mut sockets, mut led, http_servers} = ctx.resources;
+
+        sockets.lock(|sockets| {
+            for http_server in http_servers {
+                replace_with_or_abort(http_server, |http_server| {
+                    match http_server {
+                        HttpState::Init(x) => x.transition(sockets),
+                        HttpState::Listen(x) => x.transition(sockets),
+                        HttpState::Send(x) => x.transition(sockets),
+                        HttpState::Receive(x) => x.transition(sockets, led.lock(|led| led.is_low().unwrap()))
+                    }
+                });
+            };
+        });
+    }
+
+    #[task(priority = 1, resources = [usb_dev, iface, sockets])]
+    fn usb_poll(ctx: usb_poll::Context) {
+        let usb_poll::Resources {usb_dev, mut iface, sockets} = ctx.resources;
+
+        (usb_dev, &mut iface).lock(|usb_dev, iface| {
+            usb_dev.poll(&mut [iface.device_mut().inner()])
+        });
+
+        (&mut iface, sockets).lock(|iface, sockets| {
+            let instant = smoltcp::time::Instant::from_millis(
+                *monotonics::MyMono::now().duration_since_epoch().integer()/84_000
+            );
+            let _ = iface.poll(sockets, instant);
+        });
+
+        http_step::spawn().unwrap();
+        usb_poll::spawn_after(Microseconds(1_000_000u32/48_000)).unwrap();
+    }
+
+    #[idle]
+    fn idle(_ctx: idle::Context) -> ! {
+        loop {
         }
     }
 }

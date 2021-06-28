@@ -25,7 +25,12 @@ usbd-serial = "0.1.1"
 defmt = "0.2.0"
 defmt-rtt = "0.2.0"
 rtcc = "0.2"
-core_io = "0.1.20210325"
+numtoa = "0.2.4"
+
+[dependencies.replace_with]
+version = "0.1.7"
+default-features = false
+features = ["nightly"]
 
 [dependencies.managed]
 version = "0.7.2"
@@ -35,7 +40,7 @@ default-features = false
 git = "https://github.com/smoltcp-rs/smoltcp"
 rev = "027f255f904b9b7c4226cfd8b2d31f272ffa5105"
 default-features = false
-features = ["proto-ipv4", "medium-ethernet", "socket-tcp"]
+features = ["proto-ipv6", "medium-ethernet", "socket-tcp", "socket-udp", "socket-raw"]
 
 [dependencies.stm32f4xx-hal]
 version = "0.9"
@@ -49,6 +54,9 @@ default-features = false
 [profile.dev.package."*"]
 opt-level = 'z'
 
+# [profile.dev]
+# opt-level = 2
+
 [profile.release]
 opt-level = 3
 lto = true
@@ -61,4 +69,5 @@ defmt-info = []
 defmt-warn = []
 defmt-error = []
 
-default = ["defmt-default", "smoltcp/defmt-trace"]
+default = ["defmt-default"# , "smoltcp/defmt-trace", "smoltcp/verbose", "smoltcp/defmt"
+]

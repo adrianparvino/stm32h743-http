@@ -91,8 +91,6 @@ impl<'a, B: UsbBus> CdcEcmClass<'a, B> {
                     Ok(bytes_written) => {
                         assert!(bytes_to_write == bytes_written);
 
-
-
                         if offset < 64 {
                             self.tx_state.set(Bof);
                         } else if offset == 64 {
@@ -170,7 +168,8 @@ impl<B: UsbBus> UsbClass<B> for CdcEcmClass<'_, B> {
         writer.interface_alt(self.data_if, 1, USB_CLASS_CDC_DATA, CDC_SUBCLASS_ECM, 0, None)?;
         writer.endpoint(&self.write_ep)?;
         writer.endpoint(&self.read_ep)?;
-        Ok (())
+
+        Ok(())
     }
 
     fn get_alt_setting(&mut self, interface: InterfaceNumber) -> Option<u8> {
@@ -198,11 +197,11 @@ impl<B: UsbBus> UsbClass<B> for CdcEcmClass<'_, B> {
 
     fn endpoint_out(&mut self, addr: EndpointAddress) {
         if addr == self.read_ep.address() {
-            match self.rx_state.get() {
-                Receiving(offset) => {
-                    match self.read_ep.read(&mut self.rx_buffer.borrow_mut()[offset..]) {
-                        Ok(bytes_read) if bytes_read == 64 => {
-                            self.rx_state.set(Receiving(offset + bytes_read));
+            match (self.rx_state.get(), self.rx_buffer.borrow_mut()) {
+                (Receiving(offset), mut buffer) if buffer[offset..].len() >= 64 => {
+                    match self.read_ep.read(&mut buffer[offset..]) {
+                        Ok(64) => {
+                            self.rx_state.set(Receiving(offset + 64));
                         }
                         Ok(bytes_read) => {
                             self.rx_state.set(Eof(offset + bytes_read))
