@@ -14,8 +14,6 @@ mod response_builder;
 mod request;
 mod http_server;
 
-extern crate managed;
-
 use defmt_rtt as _;
 use panic_halt as _;
 
