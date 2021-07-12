@@ -36,11 +36,8 @@ pub enum State {
     Send(Send)
 }
 
-#[cfg(not(debug_assertions))]
 static INDEX_HTML: &[u8] = include_bytes!("index.html");
-#[cfg(not(debug_assertions))]
 static APP_JS_GZ: &[u8] = include_bytes!("app.js.gz");
-#[cfg(not(debug_assertions))]
 static SITE_CSS_GZ: &[u8] = include_bytes!("site.css.gz");
 
 impl State {
@@ -145,7 +142,6 @@ impl Receive {
         });
 
         match result {
-            #[cfg(not(debug_assertions))]
             Ok(Some((Method::Get, b"/index.html", _))) => {
                 let body = INDEX_HTML;
 
@@ -160,7 +156,6 @@ impl Receive {
 
                 State::Send(Send { handle, receive_buffer, body })
             },
-            #[cfg(not(debug_assertions))]
             Ok(Some((Method::Get, b"/js/app.js", _))) => {
                 let body = APP_JS_GZ;
 
@@ -176,7 +171,6 @@ impl Receive {
 
                 State::Send(Send { handle, receive_buffer, body })
             },
-            #[cfg(not(debug_assertions))]
             Ok(Some((Method::Get, b"/css/site.css", _))) => {
                 let body = SITE_CSS_GZ;
 

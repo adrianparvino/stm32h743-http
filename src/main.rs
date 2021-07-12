@@ -17,17 +17,20 @@ mod http_server;
 use defmt_rtt as _;
 use panic_halt as _;
 
-#[app(device = stm32f4xx_hal::stm32, peripherals = true, dispatchers = [USART1, USART2])]
+#[app(device = stm32h7xx_hal::stm32, peripherals = true, dispatchers = [USART1, USART2])]
 mod app {
     use rtic::Monotonic;
     use rtic::time::duration::Seconds;
     use rtic::time::duration::Milliseconds;
     use rtic::time::duration::Microseconds;
-    use stm32f4xx_hal::{
-        gpio::{gpioa::PA0, gpioc::PC13, Input, Output, PullUp, PushPull},
-        otg_fs::{UsbBus, USB, UsbBusType},
+    use stm32h7xx_hal::{
+        rcc::rec::UsbClkSel,
+        gpio::{gpioa::PA1, Input, Output, PullUp, PushPull},
+        usb_hs::{UsbBus, USB2},
         prelude::*,
     };
+    use embedded_hal::digital::v2::InputPin;
+    use embedded_hal::digital::v2::OutputPin;
 
     use usb_device::prelude::*;
     use usb_device::class_prelude::UsbBusAllocator;
@@ -77,19 +80,19 @@ mod app {
 
     #[resources]
     struct Resources {
-        usb_dev: UsbDevice<'static, UsbBus<USB>>,
-        iface: EthernetInterface<'static, Veth<'static, UsbBus<USB>>>,
+        usb_dev: UsbDevice<'static, UsbBus<USB2>>,
+        iface: EthernetInterface<'static, Veth<'static, UsbBus<USB2>>>,
         sockets: SocketSet<'static>,
         // rtc: Rtc,
-        button: PA0<Input<PullUp>>,
-        led: PC13<Output<PushPull>>,
+        // button: PA0<Input<PullUp>>,
+        led: PA1<Output<PushPull>>,
 
         #[lock_free]
         http_servers: [http_server::State; 2]
     }
 
     #[monotonic(binds = SysTick, default = true)]
-    type MyMono = DwtSystick<108_000_000>; // 108 MHz
+    type MyMono = DwtSystick<400_000_000>; // 400 MHz
 
     #[init]
     fn init(mut ctx: init::Context) -> (init::LateResources, init::Monotonics) {
@@ -115,7 +118,7 @@ mod app {
         static mut ICMP_TX_PACKET_METADATA: [RawPacketMetadata; 4] = [RawPacketMetadata::EMPTY; 4];
 
         static mut EP_MEMORY: [u32; 2048] = [0; 2048];
-        static mut USB_BUS: MaybeUninit<UsbBusAllocator<UsbBusType>> = MaybeUninit::uninit();
+        static mut USB_BUS: MaybeUninit<UsbBusAllocator<UsbBus<USB2>>> = MaybeUninit::uninit();
         static mut IP_ADDRS: MaybeUninit<[IpCidr; 2]> = MaybeUninit::uninit();
         static mut NEIGHBOR_CACHE: [Option<(IpAddress, Neighbor)>; 8] = [None; 8];
         static mut SOCKET_STORE: [Option<SocketSetItem<'static>>; 8] = [None, None, None, None, None, None, None, None];
@@ -130,34 +133,39 @@ mod app {
 
         let neighbor_cache = NeighborCache::new(NEIGHBOR_CACHE as &'static mut [Option<(IpAddress, Neighbor)>] );
 
+
+        let pwr = ctx.device.PWR.constrain();
+        let pwrcfg = pwr.freeze();
+
         let rcc = ctx.device.RCC.constrain();
-        let clocks = unsafe {
-            rcc.cfgr
-                .use_hse(25.mhz())
-                .sysclk(108.mhz())
-                .pclk1(24.mhz())
-                .require_pll48clk()
-                .freeze_unchecked()
+        let mut ccdr = {
+            rcc.use_hse(25.mhz())
+               .sysclk(400.mhz())
+               .freeze(pwrcfg, &ctx.device.SYSCFG)
         };
 
-        let dwt_systick = MyMono::new(&mut ctx.core.DCB, ctx.core.DWT, ctx.core.SYST, 108_000_000);
 
-        let gpioa = ctx.device.GPIOA.split();
-        let button = gpioa.pa0.into_pull_up_input();
-        let pin_dp = gpioa.pa12.into_alternate_af10();
+        // 48MHz CLOCK
+        let _ = ccdr.clocks.hsi48_ck().expect("HSI48 must run");
+        ccdr.peripheral.kernel_usb_clk_mux(UsbClkSel::HSI48);
+
+        let dwt_systick = MyMono::new(&mut ctx.core.DCB, ctx.core.DWT, ctx.core.SYST, 400_000_000);
+
+        let gpioa = ctx.device.GPIOA.split(ccdr.peripheral.GPIOA);
+        let led = gpioa.pa1.into_push_pull_output();
+
         let pin_dm = gpioa.pa11.into_alternate_af10();
+        let pin_dp = gpioa.pa12.into_alternate_af10();
 
-        let gpioc = ctx.device.GPIOC.split();
-        let led = gpioc.pc13.into_push_pull_output();
-
-        let usb = USB {
-            usb_global: ctx.device.OTG_FS_GLOBAL,
-            usb_device: ctx.device.OTG_FS_DEVICE,
-            usb_pwrclk: ctx.device.OTG_FS_PWRCLK,
-            hclk: clocks.hclk(),
+        let usb = USB2::new(
+            ctx.device.OTG2_HS_GLOBAL,
+            ctx.device.OTG2_HS_DEVICE,
+            ctx.device.OTG2_HS_PWRCLK,
             pin_dm,
-            pin_dp
-        };
+            pin_dp,
+            ccdr.peripheral.USB2OTG,
+            &ccdr.clocks
+        );
 
         let usb_bus = unsafe {
             USB_BUS.as_mut_ptr().write(UsbBus::new(usb, &mut *EP_MEMORY));
@@ -211,7 +219,7 @@ mod app {
             usb_dev,
             iface,
             sockets,
-            button,
+            // button,
             http_servers: [http_server0, http_server1],
             // rtc,
             led
@@ -327,7 +335,7 @@ mod app {
 
         (&mut iface, sockets).lock(|iface, sockets| {
             let instant = smoltcp::time::Instant::from_millis(
-                *monotonics::MyMono::now().duration_since_epoch().integer()/84_000
+                monotonics::MyMono::now().duration_since_epoch().integer()/400_000_000
             );
             let _ = iface.poll(sockets, instant);
         });

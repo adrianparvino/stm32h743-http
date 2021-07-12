@@ -1,5 +1,5 @@
 [package]
-name = "black-pill-http"
+name = "stm32h743-http"
 version = "0.1.0"
 authors = ["Adrian Parvin D. Ouano <me@adrianpar.vin>"]
 edition = "2018"
@@ -42,9 +42,9 @@ rev = "027f255f904b9b7c4226cfd8b2d31f272ffa5105"
 default-features = false
 features = ["proto-ipv6", "medium-ethernet", "socket-tcp", "socket-udp", "socket-raw"]
 
-[dependencies.stm32f4xx-hal]
+[dependencies.stm32h7xx-hal]
 version = "0.9"
-features = ["rt", "stm32f401", "usb_fs"] # replace the model of your microcontroller here
+features = ["rt", "stm32h743", "usb_hs"] # replace the model of your microcontroller here
 
 [dependencies.httparse]
 version = "1.4.1"
