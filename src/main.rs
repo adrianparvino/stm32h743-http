@@ -15,7 +15,7 @@ mod request;
 mod http_server;
 
 use defmt_rtt as _;
-use panic_halt as _;
+use panic_probe as _;
 
 #[app(device = stm32h7xx_hal::stm32, peripherals = true, dispatchers = [USART1, USART2])]
 mod app {
@@ -78,50 +78,81 @@ mod app {
         Transmit(&'static mut Vec<u8, 1024>, &'static [u8]),
     }
 
-    #[resources]
-    struct Resources {
+    #[shared]
+    struct Shared {
         usb_dev: UsbDevice<'static, UsbBus<USB2>>,
         iface: EthernetInterface<'static, Veth<'static, UsbBus<USB2>>>,
         sockets: SocketSet<'static>,
         // rtc: Rtc,
         // button: PA0<Input<PullUp>>,
         led: PA1<Output<PushPull>>,
+    }
 
-        #[lock_free]
+    #[local]
+    struct Local {
         http_servers: [http_server::State; 2]
     }
 
     #[monotonic(binds = SysTick, default = true)]
     type MyMono = DwtSystick<400_000_000>; // 400 MHz
 
-    #[init]
-    fn init(mut ctx: init::Context) -> (init::LateResources, init::Monotonics) {
-        static mut ETH_RX_BUFFER: [u8; 1514] = [0u8; 1514];
-        static mut ETH_TX_BUFFER: [u8; 1514] = [0u8; 1514];
+    #[init(local = [
+        ETH_RX_BUFFER: [u8; 1514] = [0u8; 1514],
+        ETH_TX_BUFFER: [u8; 1514] = [0u8; 1514],
 
-        static mut TCP_RX_BUFFER0: [u8; 128] = [0u8; 128];
-        static mut TCP_TX_BUFFER0: [u8; 1024] = [0u8; 1024];
-        static mut HTTP_STATE0: Vec<u8, 1024> = Vec::new();
+        TCP_RX_BUFFER0: [u8; 1024] = [0u8; 1024],
+        TCP_TX_BUFFER0: [u8; 2048] = [0u8; 2048],
+        HTTP_STATE0: Vec<u8, 1024> = Vec::new(),
 
-        static mut TCP_RX_BUFFER1: [u8; 128] = [0u8; 128];
-        static mut TCP_TX_BUFFER1: [u8; 1024] = [0u8; 1024];
-        static mut HTTP_STATE1: Vec<u8, 1024> = Vec::new();
+        TCP_RX_BUFFER1: [u8; 1024] = [0u8; 1024],
+        TCP_TX_BUFFER1: [u8; 2048] = [0u8; 2048],
+        HTTP_STATE1: Vec<u8, 1024> = Vec::new(),
 
-        static mut MDNS_RX_BUFFER: [u8; 512] = [0u8; 512];
-        static mut MDNS_TX_BUFFER: [u8; 512] = [0u8; 512];
-        static mut MDNS_RX_UDP_PACKET_METADATA: [UdpPacketMetadata; 4] = [UdpPacketMetadata::EMPTY; 4];
-        static mut MDNS_TX_UDP_PACKET_METADATA: [UdpPacketMetadata; 4] = [UdpPacketMetadata::EMPTY; 4];
+        MDNS_RX_BUFFER: [u8; 512] = [0u8; 512],
+        MDNS_TX_BUFFER: [u8; 512] = [0u8; 512],
+        MDNS_RX_UDP_PACKET_METADATA: [UdpPacketMetadata; 4] = [UdpPacketMetadata::EMPTY; 4],
+        MDNS_TX_UDP_PACKET_METADATA: [UdpPacketMetadata; 4] = [UdpPacketMetadata::EMPTY; 4],
 
-        static mut ICMP_RX_BUFFER: [u8; 512] = [0u8; 512];
-        static mut ICMP_TX_BUFFER: [u8; 512] = [0u8; 512];
-        static mut ICMP_RX_PACKET_METADATA: [RawPacketMetadata; 4] = [RawPacketMetadata::EMPTY; 4];
-        static mut ICMP_TX_PACKET_METADATA: [RawPacketMetadata; 4] = [RawPacketMetadata::EMPTY; 4];
+        ICMP_RX_BUFFER: [u8; 512] = [0u8; 512],
+        ICMP_TX_BUFFER: [u8; 512] = [0u8; 512],
+        ICMP_RX_PACKET_METADATA: [RawPacketMetadata; 4] = [RawPacketMetadata::EMPTY; 4],
+        ICMP_TX_PACKET_METADATA: [RawPacketMetadata; 4] = [RawPacketMetadata::EMPTY; 4],
 
-        static mut EP_MEMORY: [u32; 2048] = [0; 2048];
-        static mut USB_BUS: MaybeUninit<UsbBusAllocator<UsbBus<USB2>>> = MaybeUninit::uninit();
-        static mut IP_ADDRS: MaybeUninit<[IpCidr; 2]> = MaybeUninit::uninit();
-        static mut NEIGHBOR_CACHE: [Option<(IpAddress, Neighbor)>; 8] = [None; 8];
-        static mut SOCKET_STORE: [Option<SocketSetItem<'static>>; 8] = [None, None, None, None, None, None, None, None];
+        EP_MEMORY: [u32; 2048] = [0; 2048],
+        USB_BUS: MaybeUninit<UsbBusAllocator<UsbBus<USB2>>> = MaybeUninit::uninit(),
+        IP_ADDRS: MaybeUninit<[IpCidr; 2]> = MaybeUninit::uninit(),
+        NEIGHBOR_CACHE: [Option<(IpAddress, Neighbor)>; 8] = [None; 8],
+        SOCKET_STORE: [Option<SocketSetItem<'static>>; 8] = [None, None, None, None, None, None, None, None]
+    ])]
+    fn init(mut ctx: init::Context) -> (Shared, Local, init::Monotonics) {
+        let init::LocalResources {
+            ETH_RX_BUFFER,
+            ETH_TX_BUFFER,
+
+            TCP_RX_BUFFER0,
+            TCP_TX_BUFFER0,
+            HTTP_STATE0,
+
+            TCP_RX_BUFFER1,
+            TCP_TX_BUFFER1,
+            HTTP_STATE1,
+
+            MDNS_RX_BUFFER,
+            MDNS_TX_BUFFER,
+            MDNS_RX_UDP_PACKET_METADATA,
+            MDNS_TX_UDP_PACKET_METADATA,
+
+            ICMP_RX_BUFFER,
+            ICMP_TX_BUFFER,
+            ICMP_RX_PACKET_METADATA,
+            ICMP_TX_PACKET_METADATA,
+
+            EP_MEMORY,
+            USB_BUS,
+            IP_ADDRS,
+            NEIGHBOR_CACHE,
+            SOCKET_STORE
+        } = ctx.local;
 
         let ip_addrs: &'static mut [IpCidr] = unsafe {
             IP_ADDRS.as_mut_ptr().write([
@@ -141,9 +172,9 @@ mod app {
         let mut ccdr = {
             rcc.use_hse(25.mhz())
                .sysclk(400.mhz())
+               .pll1_strategy(stm32h7xx_hal::rcc::PllConfigStrategy::Iterative)
                .freeze(pwrcfg, &ctx.device.SYSCFG)
         };
-
 
         // 48MHz CLOCK
         let _ = ccdr.clocks.hsi48_ck().expect("HSI48 must run");
@@ -211,24 +242,27 @@ mod app {
         let icmp_socket = RawSocket::new(IpVersion::Ipv6, Icmpv6, icmp_rx_buffer, icmp_tx_buffer);
         let icmp_handle = sockets.add(icmp_socket);
 
-        raw_recv::spawn_after(Milliseconds(4500u32), icmp_handle).unwrap();
-        mdns_recv::spawn_after(Seconds(5u32), mdns_handle).unwrap();
+        raw_recv::spawn_after(Milliseconds(3000u32), icmp_handle).unwrap();
+        mdns_recv::spawn_after(Seconds(3u32), mdns_handle).unwrap();
         usb_poll::spawn().unwrap();
 
-        (init::LateResources {
+        (Shared {
             usb_dev,
             iface,
             sockets,
             // button,
-            http_servers: [http_server0, http_server1],
             // rtc,
             led
-        }, init::Monotonics(dwt_systick))
+        }, Local {
+            http_servers: [http_server0, http_server1]
+        }, init::Monotonics(
+            dwt_systick
+        ))
     }
 
-    #[task(resources = [led])]
+    #[task(shared = [led])]
     fn set_led(ctx: set_led::Context, state: bool) {
-        let set_led::Resources {mut led} = ctx.resources;
+        let set_led::SharedResources {mut led} = ctx.shared;
 
         led.lock(|led| {
             if state {
@@ -239,9 +273,9 @@ mod app {
         });
     }
 
-    #[task(priority = 2, resources = [sockets])]
+    #[task(priority = 2, shared = [sockets])]
     fn mdns_recv(ctx: mdns_recv::Context, mdns_handle: SocketHandle) {
-        let mdns_recv::Resources {mut sockets} = ctx.resources;
+        let mdns_recv::SharedResources {mut sockets} = ctx.shared;
 
         sockets.lock(|sockets| {
             let mut socket = sockets.get::<UdpSocket>(mdns_handle);
@@ -259,9 +293,9 @@ mod app {
         mdns_recv::spawn_after(Seconds(1u32), mdns_handle).unwrap();
     }
 
-    #[task(priority = 2, resources = [sockets])]
+    #[task(priority = 2, shared = [sockets])]
     fn raw_recv(ctx: raw_recv::Context, raw_handle: SocketHandle) {
-        let raw_recv::Resources {mut sockets} = ctx.resources;
+        let raw_recv::SharedResources {mut sockets} = ctx.shared;
 
         sockets.lock(|sockets| {
             let mut socket = sockets.get::<RawSocket>(raw_handle);
@@ -307,9 +341,10 @@ mod app {
         raw_recv::spawn_after(Seconds(1u32), raw_handle).unwrap();
     }
 
-    #[task(resources = [sockets, led, http_servers])]
+    #[task(shared = [sockets, led], local = [http_servers])]
     fn http_step(ctx: http_step::Context) {
-        let http_step::Resources {mut sockets, mut led, http_servers} = ctx.resources;
+        let http_step::SharedResources { mut sockets, mut led } = ctx.shared;
+        let http_step::LocalResources { http_servers } = ctx.local;
 
         sockets.lock(|sockets| {
             for http_server in http_servers {
@@ -325,9 +360,9 @@ mod app {
         });
     }
 
-    #[task(priority = 1, resources = [usb_dev, iface, sockets])]
+    #[task(priority = 1, shared = [usb_dev, iface, sockets])]
     fn usb_poll(ctx: usb_poll::Context) {
-        let usb_poll::Resources {usb_dev, mut iface, sockets} = ctx.resources;
+        let usb_poll::SharedResources {usb_dev, mut iface, sockets} = ctx.shared;
 
         (usb_dev, &mut iface).lock(|usb_dev, iface| {
             usb_dev.poll(&mut [iface.device_mut().inner()])

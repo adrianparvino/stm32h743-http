@@ -138,8 +138,9 @@ dependencies = [
 
 [[package]]
 name = "cortex-m-rtic"
-version = "0.6.0-alpha.4"
-source = "git+https://github.com/rtic-rs/cortex-m-rtic?rev=9bea30b5a8466f1ecef8a72eccb994be8cba22a8#9bea30b5a8466f1ecef8a72eccb994be8cba22a8"
+version = "0.6.0-alpha.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74081ae0575d772472789aa6a642a1632303fd64529078d7be06fdcbec31401a"
 dependencies = [
  "bare-metal 1.0.0",
  "cortex-m 0.7.2",
@@ -153,8 +154,9 @@ dependencies = [
 
 [[package]]
 name = "cortex-m-rtic-macros"
-version = "0.6.0-alpha.4"
-source = "git+https://github.com/rtic-rs/cortex-m-rtic?rev=9bea30b5a8466f1ecef8a72eccb994be8cba22a8#9bea30b5a8466f1ecef8a72eccb994be8cba22a8"
+version = "0.6.0-alpha.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c537c47b1d14be9bc6781f0bdfc514a043dd03d33796fa4f1052ac8e13c7f7d4"
 dependencies = [
  "proc-macro-error",
  "proc-macro2",
@@ -203,9 +205,9 @@ dependencies = [
 
 [[package]]
 name = "dwt-systick-monotonic"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91d24d2f9d27b5574d2cecae2c90f878e9c9fa2ac4622c11a4b48322094bd1e2"
+checksum = "a112486e3b6240815447add3e18d2ed6ae6bbc0d35d285dfc3e4114d48d4aa6b"
 dependencies = [
  "cortex-m 0.7.2",
  "rtic-monotonic",
@@ -232,9 +234,9 @@ dependencies = [
 
 [[package]]
 name = "embedded-time"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc1aa2520307e7156300dc49771640c9263dc0202d1ddee971d77e7790568c07"
+checksum = "86fbafcea0dea120d8ed8af67ddbf82afc031f1d3b064920645db8d061781e2c"
 dependencies = [
  "num",
 ]
@@ -427,10 +429,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
 
 [[package]]
-name = "panic-halt"
+name = "panic-probe"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de96540e0ebde571dc55c73d60ef407c653844e6f9a1e2fdbd40c07b9252d812"
+checksum = "45b5c81d6b51f415b3ba40b30dc598dfffb29ad4cf4a8815989754850ce6c0dc"
+dependencies = [
+ "cortex-m 0.6.7",
+ "cortex-m-rt",
+ "defmt",
+]
 
 [[package]]
 name = "paste"
@@ -518,18 +525,18 @@ checksum = "8bd58a6949de8ff797a346a28d9f13f7b8f54fa61bb5e3cb0985a4efb497a5ef"
 
 [[package]]
 name = "rtic-monotonic"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993bce0a3f4f8d50a4591163de19b1d2da44e6552b8c41a2016b4fdbf696e1db"
+checksum = "9cbf2b6e30a7e6d184be839e0858745fa15ca1af81755c9edcb7b612676604b9"
 dependencies = [
  "embedded-time",
 ]
 
 [[package]]
 name = "rtic-syntax"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e761da64f9a1dd262b052cf2be81a5d3dab8009fda0dc08a7c88e5c623382a3"
+checksum = "7676b45b31022d31d9db7efe19a0c0f554e68cf569df389a75664f7b6b7aa8ef"
 dependencies = [
  "indexmap",
  "proc-macro2",
@@ -638,7 +645,7 @@ dependencies = [
  "managed 0.7.2",
  "nb 1.0.0",
  "numtoa",
- "panic-halt",
+ "panic-probe",
  "replace_with",
  "rtcc",
  "rtic-monotonic",
