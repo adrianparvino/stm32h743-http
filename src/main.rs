@@ -9,54 +9,40 @@
 use rtic::app;
 
 mod cdc_ecm;
-mod veth;
-mod response_builder;
-mod request;
 mod http_server;
+mod request;
+mod response_builder;
+mod veth;
 
 use defmt_rtt as _;
 use panic_probe as _;
 
 #[app(device = stm32h7xx_hal::stm32, peripherals = true, dispatchers = [USART1, USART2])]
 mod app {
-    use rtic::Monotonic;
-    use rtic::time::duration::Seconds;
-    use rtic::time::duration::Milliseconds;
-    use rtic::time::duration::Microseconds;
-    use stm32h7xx_hal::{
-        rcc::rec::UsbClkSel,
-        gpio::{gpioa::PA1, Input, Output, PullUp, PushPull},
-        usb_hs::{UsbBus, USB2},
-        prelude::*,
-    };
     use embedded_hal::digital::v2::InputPin;
     use embedded_hal::digital::v2::OutputPin;
+    use rtic::Monotonic;
+    use stm32h7xx_hal::{
+        gpio::{gpioa::PA1, Input, Output, PushPull},
+        prelude::*,
+        rcc::rec::UsbClkSel,
+        usb_hs::{UsbBus, USB2},
+    };
 
-    use usb_device::prelude::*;
     use usb_device::class_prelude::UsbBusAllocator;
+    use usb_device::prelude::*;
 
-    use smoltcp::time::Duration;
-    use smoltcp::iface::{Neighbor, NeighborCache, InterfaceBuilder, Interface as EthernetInterface};
-    use smoltcp::wire::{
-        IpCidr,
-        IpAddress,
-        Ipv6Repr,
-        EthernetAddress,
-        IpVersion,
-        IpProtocol::*,
-        Icmpv6Repr::Ndisc,
-        NdiscRouterFlags,
-        NdiscPrefixInformation,
-        NdiscPrefixInfoFlags,
-        NdiscRepr::*
+    use smoltcp::iface::{
+        Interface as EthernetInterface, InterfaceBuilder, Neighbor, NeighborCache,
     };
     use smoltcp::socket::{
-        SocketHandle,
-        SocketSet,
-        SocketSetItem,
-        TcpSocket, TcpSocketBuffer,
-        UdpSocket, UdpSocketBuffer, UdpPacketMetadata,
-        RawSocket, RawSocketBuffer, RawPacketMetadata,
+        RawPacketMetadata, RawSocket, RawSocketBuffer, SocketHandle, SocketSet, SocketSetItem,
+        TcpSocket, TcpSocketBuffer, UdpPacketMetadata, UdpSocket, UdpSocketBuffer,
+    };
+    use smoltcp::time::Duration;
+    use smoltcp::wire::{
+        EthernetAddress, Icmpv6Repr::Ndisc, IpAddress, IpCidr, IpProtocol::*, IpVersion, Ipv6Repr,
+        NdiscPrefixInfoFlags, NdiscPrefixInformation, NdiscRepr::*, NdiscRouterFlags,
     };
 
     use dwt_systick_monotonic::DwtSystick;
@@ -66,8 +52,9 @@ mod app {
     use core::mem::MaybeUninit;
 
     use crate::cdc_ecm::*;
-    use crate::veth::*;
     use crate::http_server::{self, State as HttpState};
+    use crate::veth::*;
+    use fugit::ExtU64;
 
     use heapless::Vec;
 
@@ -83,14 +70,12 @@ mod app {
         usb_dev: UsbDevice<'static, UsbBus<USB2>>,
         iface: EthernetInterface<'static, Veth<'static, UsbBus<USB2>>>,
         sockets: SocketSet<'static>,
-        // rtc: Rtc,
-        // button: PA0<Input<PullUp>>,
         led: PA1<Output<PushPull>>,
     }
 
     #[local]
     struct Local {
-        http_servers: [http_server::State; 2]
+        http_servers: [http_server::State; 2],
     }
 
     #[monotonic(binds = SysTick, default = true)]
@@ -151,42 +136,42 @@ mod app {
             USB_BUS,
             IP_ADDRS,
             NEIGHBOR_CACHE,
-            SOCKET_STORE
+            SOCKET_STORE,
         } = ctx.local;
 
         let ip_addrs: &'static mut [IpCidr] = unsafe {
             IP_ADDRS.as_mut_ptr().write([
                 IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 0, 0xff, 0xfe00, 1), 64),
-                IpCidr::new(IpAddress::v6(0xfd00, 0, 0, 0, 0, 0, 0, 1), 64)
+                IpCidr::new(IpAddress::v6(0xfd00, 0, 0, 0, 0, 0, 0, 1), 64),
             ]);
             IP_ADDRS.assume_init_mut()
         };
 
-        let neighbor_cache = NeighborCache::new(NEIGHBOR_CACHE as &'static mut [Option<(IpAddress, Neighbor)>] );
-
+        let neighbor_cache =
+            NeighborCache::new(NEIGHBOR_CACHE as &'static mut [Option<(IpAddress, Neighbor)>]);
 
         let pwr = ctx.device.PWR.constrain();
         let pwrcfg = pwr.freeze();
 
         let rcc = ctx.device.RCC.constrain();
         let mut ccdr = {
-            rcc.use_hse(25.mhz())
-               .sysclk(400.mhz())
-               .pll1_strategy(stm32h7xx_hal::rcc::PllConfigStrategy::Iterative)
-               .freeze(pwrcfg, &ctx.device.SYSCFG)
+            rcc.use_hse(25.MHz())
+                .sysclk(400.MHz())
+                .pll1_strategy(stm32h7xx_hal::rcc::PllConfigStrategy::Iterative)
+                .freeze(pwrcfg, &ctx.device.SYSCFG)
         };
 
         // 48MHz CLOCK
         let _ = ccdr.clocks.hsi48_ck().expect("HSI48 must run");
-        ccdr.peripheral.kernel_usb_clk_mux(UsbClkSel::HSI48);
+        ccdr.peripheral.kernel_usb_clk_mux(UsbClkSel::Hsi48);
 
         let dwt_systick = MyMono::new(&mut ctx.core.DCB, ctx.core.DWT, ctx.core.SYST, 400_000_000);
 
         let gpioa = ctx.device.GPIOA.split(ccdr.peripheral.GPIOA);
         let led = gpioa.pa1.into_push_pull_output();
 
-        let pin_dm = gpioa.pa11.into_alternate_af10();
-        let pin_dp = gpioa.pa12.into_alternate_af10();
+        let pin_dm = gpioa.pa11.into_alternate();
+        let pin_dp = gpioa.pa12.into_alternate();
 
         let usb = USB2::new(
             ctx.device.OTG2_HS_GLOBAL,
@@ -195,11 +180,13 @@ mod app {
             pin_dm,
             pin_dp,
             ccdr.peripheral.USB2OTG,
-            &ccdr.clocks
+            &ccdr.clocks,
         );
 
         let usb_bus = unsafe {
-            USB_BUS.as_mut_ptr().write(UsbBus::new(usb, &mut *EP_MEMORY));
+            USB_BUS
+                .as_mut_ptr()
+                .write(UsbBus::new(usb, &mut *EP_MEMORY));
             USB_BUS.assume_init_ref()
         };
 
@@ -212,12 +199,13 @@ mod app {
         let veth = ecm.jack_in();
 
         let iface = InterfaceBuilder::new(veth)
-            .ethernet_addr(EthernetAddress::from_bytes(&[2,0,0,0,0,1]))
+            .ethernet_addr(EthernetAddress::from_bytes(&[2, 0, 0, 0, 0, 1]))
             .neighbor_cache(neighbor_cache)
             .ip_addrs(ip_addrs)
             .finalize();
 
-        let mut sockets = SocketSet::new(SOCKET_STORE as &'static mut [Option<SocketSetItem<'static>>]);
+        let mut sockets =
+            SocketSet::new(SOCKET_STORE as &'static mut [Option<SocketSetItem<'static>>]);
 
         let tcp_rx_buffer0 = TcpSocketBuffer::new(TCP_RX_BUFFER0 as &'static mut [u8]);
         let tcp_tx_buffer0 = TcpSocketBuffer::new(TCP_TX_BUFFER0 as &'static mut [u8]);
@@ -231,71 +219,87 @@ mod app {
         let tcp_handle1 = sockets.add(tcp_socket1);
         let http_server1 = HttpState::new(tcp_handle1, HTTP_STATE1);
 
-        let mdns_rx_buffer = UdpSocketBuffer::new(MDNS_RX_UDP_PACKET_METADATA as &'static mut [UdpPacketMetadata], MDNS_RX_BUFFER as &'static mut [u8]);
-        let mdns_tx_buffer = UdpSocketBuffer::new(MDNS_TX_UDP_PACKET_METADATA as &'static mut [UdpPacketMetadata], MDNS_TX_BUFFER as &'static mut [u8]);
+        let mdns_rx_buffer = UdpSocketBuffer::new(
+            MDNS_RX_UDP_PACKET_METADATA as &'static mut [UdpPacketMetadata],
+            MDNS_RX_BUFFER as &'static mut [u8],
+        );
+        let mdns_tx_buffer = UdpSocketBuffer::new(
+            MDNS_TX_UDP_PACKET_METADATA as &'static mut [UdpPacketMetadata],
+            MDNS_TX_BUFFER as &'static mut [u8],
+        );
         let mdns_socket = UdpSocket::new(mdns_rx_buffer, mdns_tx_buffer);
         let mdns_handle = sockets.add(mdns_socket);
         sockets.get::<UdpSocket>(mdns_handle).bind(5353).unwrap();
 
-        let icmp_rx_buffer = RawSocketBuffer::new(ICMP_RX_PACKET_METADATA as &'static mut [RawPacketMetadata], ICMP_RX_BUFFER as &'static mut [u8]);
-        let icmp_tx_buffer = RawSocketBuffer::new(ICMP_TX_PACKET_METADATA as &'static mut [RawPacketMetadata], ICMP_TX_BUFFER as &'static mut [u8]);
+        let icmp_rx_buffer = RawSocketBuffer::new(
+            ICMP_RX_PACKET_METADATA as &'static mut [RawPacketMetadata],
+            ICMP_RX_BUFFER as &'static mut [u8],
+        );
+        let icmp_tx_buffer = RawSocketBuffer::new(
+            ICMP_TX_PACKET_METADATA as &'static mut [RawPacketMetadata],
+            ICMP_TX_BUFFER as &'static mut [u8],
+        );
         let icmp_socket = RawSocket::new(IpVersion::Ipv6, Icmpv6, icmp_rx_buffer, icmp_tx_buffer);
         let icmp_handle = sockets.add(icmp_socket);
 
-        raw_recv::spawn_after(Milliseconds(3000u32), icmp_handle).unwrap();
-        mdns_recv::spawn_after(Seconds(3u32), mdns_handle).unwrap();
+        raw_recv::spawn_after(3000u32.millis(), icmp_handle).unwrap();
+        mdns_recv::spawn_after(3u32.secs(), mdns_handle).unwrap();
         usb_poll::spawn().unwrap();
 
-        (Shared {
-            usb_dev,
-            iface,
-            sockets,
-            // button,
-            // rtc,
-            led
-        }, Local {
-            http_servers: [http_server0, http_server1]
-        }, init::Monotonics(
-            dwt_systick
-        ))
+        (
+            Shared {
+                usb_dev,
+                iface,
+                sockets,
+                // button,
+                // rtc,
+                led,
+            },
+            Local {
+                http_servers: [http_server0, http_server1],
+            },
+            init::Monotonics(dwt_systick),
+        )
     }
 
     #[task(shared = [led])]
     fn set_led(ctx: set_led::Context, state: bool) {
-        let set_led::SharedResources {mut led} = ctx.shared;
+        let set_led::SharedResources { mut led } = ctx.shared;
 
         led.lock(|led| {
             if state {
-                led.set_low().unwrap();
+                led.set_low();
             } else {
-                led.set_high().unwrap();
+                led.set_high();
             }
         });
     }
 
     #[task(priority = 2, shared = [sockets])]
     fn mdns_recv(ctx: mdns_recv::Context, mdns_handle: SocketHandle) {
-        let mdns_recv::SharedResources {mut sockets} = ctx.shared;
+        let mdns_recv::SharedResources { mut sockets } = ctx.shared;
 
         sockets.lock(|sockets| {
             let mut socket = sockets.get::<UdpSocket>(mdns_handle);
 
             let reply = [
-                0x00, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-                4, 116, 101, 115, 116, 5, 108, 111, 99, 97, 108, 0,
-                0x00, 28, 0x80, 0x01, 0x00, 0x00, 0x00, 0xff, 0x00, 0x10,
-                0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+                0x00, 0x00, 0x84, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 4, 116,
+                101, 115, 116, 5, 108, 111, 99, 97, 108, 0, 0x00, 28, 0x80, 0x01, 0x00, 0x00, 0x00,
+                0xff, 0x00, 0x10, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
             ];
 
-            socket.send_slice(&reply, smoltcp::wire::IpEndpoint::new(IpAddress::v6(0xff02, 0, 0, 0, 0, 0, 0, 0xfb), 5353));
+            socket.send_slice(
+                &reply,
+                smoltcp::wire::IpEndpoint::new(IpAddress::v6(0xff02, 0, 0, 0, 0, 0, 0, 0xfb), 5353),
+            );
         });
 
-        mdns_recv::spawn_after(Seconds(1u32), mdns_handle).unwrap();
+        mdns_recv::spawn_after(1u32.secs(), mdns_handle).unwrap();
     }
 
     #[task(priority = 2, shared = [sockets])]
     fn raw_recv(ctx: raw_recv::Context, raw_handle: SocketHandle) {
-        let raw_recv::SharedResources {mut sockets} = ctx.shared;
+        let raw_recv::SharedResources { mut sockets } = ctx.shared;
 
         sockets.lock(|sockets| {
             let mut socket = sockets.get::<RawSocket>(raw_handle);
@@ -306,23 +310,27 @@ mod app {
                 router_lifetime: Duration::from_secs(9000),
                 reachable_time: Duration::from_secs(0),
                 retrans_time: Duration::from_secs(0),
-                lladdr: Some(EthernetAddress::from_bytes(&[2,0,0,0,0,1])),
+                lladdr: Some(EthernetAddress::from_bytes(&[2, 0, 0, 0, 0, 1])),
                 mtu: None,
                 prefix_info: Some(NdiscPrefixInformation {
                     prefix_len: 64,
                     flags: NdiscPrefixInfoFlags::ADDRCONF | NdiscPrefixInfoFlags::ON_LINK,
                     valid_lifetime: Duration::from_secs(0xffffffff),
                     preferred_lifetime: Duration::from_secs(0xffffffff),
-                    prefix: smoltcp::wire::Ipv6Address([0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-                })
+                    prefix: smoltcp::wire::Ipv6Address([
+                        0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    ]),
+                }),
             });
 
             let ipv6_header = Ipv6Repr {
-                src_addr: smoltcp::wire::Ipv6Address([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xfe, 0, 0, 1]),
+                src_addr: smoltcp::wire::Ipv6Address([
+                    0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xfe, 0, 0, 1,
+                ]),
                 dst_addr: smoltcp::wire::Ipv6Address::LINK_LOCAL_ALL_NODES,
                 hop_limit: 255,
                 next_header: Icmpv6,
-                payload_len: advert.buffer_len()
+                payload_len: advert.buffer_len(),
             };
 
             if let Ok(buffer) = socket.send(ipv6_header.buffer_len() + advert.buffer_len()) {
@@ -333,55 +341,60 @@ mod app {
                     &IpAddress::from(ipv6_header.src_addr),
                     &IpAddress::from(ipv6_header.dst_addr),
                     &mut packet,
-                    &smoltcp::phy::ChecksumCapabilities::default()
+                    &smoltcp::phy::ChecksumCapabilities::default(),
                 );
             }
         });
 
-        raw_recv::spawn_after(Seconds(1u32), raw_handle).unwrap();
+        raw_recv::spawn_after(1u32.secs(), raw_handle).unwrap();
     }
 
     #[task(shared = [sockets, led], local = [http_servers])]
     fn http_step(ctx: http_step::Context) {
-        let http_step::SharedResources { mut sockets, mut led } = ctx.shared;
+        let http_step::SharedResources {
+            mut sockets,
+            mut led,
+        } = ctx.shared;
         let http_step::LocalResources { http_servers } = ctx.local;
 
         sockets.lock(|sockets| {
             for http_server in http_servers {
-                replace_with_or_abort(http_server, |http_server| {
-                    match http_server {
-                        HttpState::Init(x) => x.transition(sockets),
-                        HttpState::Listen(x) => x.transition(sockets),
-                        HttpState::Send(x) => x.transition(sockets),
-                        HttpState::Receive(x) => x.transition(sockets, led.lock(|led| led.is_low().unwrap()))
+                replace_with_or_abort(http_server, |http_server| match http_server {
+                    HttpState::Init(x) => x.transition(sockets),
+                    HttpState::Listen(x) => x.transition(sockets),
+                    HttpState::Send(x) => x.transition(sockets),
+                    HttpState::Receive(x) => {
+                        x.transition(sockets, led.lock(|led| led.is_set_low()))
                     }
                 });
-            };
+            }
         });
     }
 
     #[task(priority = 1, shared = [usb_dev, iface, sockets])]
     fn usb_poll(ctx: usb_poll::Context) {
-        let usb_poll::SharedResources {usb_dev, mut iface, sockets} = ctx.shared;
+        let usb_poll::SharedResources {
+            usb_dev,
+            mut iface,
+            sockets,
+        } = ctx.shared;
 
-        (usb_dev, &mut iface).lock(|usb_dev, iface| {
-            usb_dev.poll(&mut [iface.device_mut().inner()])
-        });
+        (usb_dev, &mut iface)
+            .lock(|usb_dev, iface| usb_dev.poll(&mut [iface.device_mut().inner()]));
 
         (&mut iface, sockets).lock(|iface, sockets| {
             let instant = smoltcp::time::Instant::from_millis(
-                monotonics::MyMono::now().duration_since_epoch().integer()/400_000_000
+                monotonics::MyMono::now().duration_since_epoch().to_millis(),
             );
             let _ = iface.poll(sockets, instant);
         });
 
         http_step::spawn().unwrap();
-        usb_poll::spawn_after(Microseconds(1_000_000u32/48_000)).unwrap();
+        usb_poll::spawn_after((1_000_000u32 / 48_000).micros()).unwrap();
     }
 
     #[idle]
     fn idle(_ctx: idle::Context) -> ! {
-        loop {
-        }
+        loop {}
     }
 }
